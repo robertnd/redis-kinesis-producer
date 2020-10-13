@@ -22,6 +22,8 @@ public @Data class ApplicationConfig {
     private String redisPassword;
     private int redisPort;
     private String secretKey;
+    private String dataKey;
+    private String dataType;
     private String recordCacheKey;
     private long streamPollTimeout;
     private String consumerName;

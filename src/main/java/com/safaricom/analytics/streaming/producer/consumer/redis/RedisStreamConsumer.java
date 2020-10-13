@@ -1,6 +1,9 @@
 package com.safaricom.analytics.streaming.producer.consumer.redis;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.safaricom.analytics.streaming.producer.config.ApplicationConfig;
+import com.safaricom.analytics.streaming.producer.kinesis.ProducerService;
+import com.safaricom.analytics.streaming.producer.model.Message;
 import io.lettuce.core.api.async.RedisAsyncCommands;
 import io.lettuce.core.codec.StringCodec;
 import io.lettuce.core.output.StatusOutput;
@@ -10,11 +13,14 @@ import io.lettuce.core.protocol.CommandType;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.redis.connection.stream.Consumer;
-import org.springframework.data.redis.connection.stream.MapRecord;
-import org.springframework.data.redis.connection.stream.ReadOffset;
-import org.springframework.data.redis.connection.stream.StreamOffset;
+import org.springframework.context.annotation.Bean;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.connection.stream.*;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.convert.MappingRedisConverter;
+import org.springframework.data.redis.core.convert.RedisConverter;
+import org.springframework.data.redis.core.mapping.RedisMappingContext;
+import org.springframework.data.redis.hash.ObjectHashMapper;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 import org.springframework.data.redis.stream.StreamListener;
 import org.springframework.data.redis.stream.StreamMessageListenerContainer;
@@ -23,6 +29,8 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.util.Collections;
+import java.util.Map;
 
 @Component
 @EnableScheduling
@@ -33,22 +41,36 @@ public class RedisStreamConsumer implements StreamListener<String, MapRecord<Str
     @Autowired
     private RedisTemplate<String, String> redisTemplate;
 
+    @Autowired
+    private ProducerService producerService;
+
     private StreamMessageListenerContainer<String, MapRecord<String, String, String>> container;
     private Subscription subscription;
     private String consumerName;
     private String consumerGroupName;
     private String streamName;
+    private String dataKey;
+    private String dataType;
+    final ObjectMapper mapper = new ObjectMapper();
 
 
     @Override
     public void onMessage(MapRecord<String, String, String> message) {
+        String payload = "";
         try {
-            String payload = "" + message.getValue();
+            if (dataType.equalsIgnoreCase("keyvalue")) {
+                Message messageObj = mapper.convertValue(message.getValue(), Message.class);
+                payload = mapper.writeValueAsString(messageObj);
+            } else {
+                payload = message.getValue().get(dataKey);
+            }
+
+            System.out.println("Message: " + payload);
+            producerService.kinesisWrite(payload);
             redisTemplate.opsForStream().acknowledge(config.getConsumerGroupName(), message);
-            System.out.println("Message" + payload);
-            System.out.printf("Message % has been processed", message.getId());
+            System.out.printf(String.format("Message %s has been processed", message.getId()));
         } catch (Exception ex) {
-            //do something
+            ex.printStackTrace();
         }
     }
 
@@ -68,8 +90,15 @@ public class RedisStreamConsumer implements StreamListener<String, MapRecord<Str
         consumerName = config.getConsumerName();
         consumerGroupName = config.getConsumerGroupName();
         streamName = config.getStreamName();
+        dataKey = config.getDataKey();
+        dataType = config.getDataType();
 
         try {
+
+            if (dataKey.isEmpty()) {
+                dataKey = "payload";
+            }
+
             if (!redisTemplate.hasKey(streamName)) {
                 System.out.printf("[%s] does not exist. Creating stream along with the consumer group", streamName);
                 RedisAsyncCommands commands = (RedisAsyncCommands) redisTemplate.getConnectionFactory()
@@ -90,6 +119,22 @@ public class RedisStreamConsumer implements StreamListener<String, MapRecord<Str
         }
 
         redisTemplate.setDefaultSerializer(new StringRedisSerializer());
+
+        /*
+
+        if (dataType.equalsIgnoreCase("keyvalue")) {
+            RedisMappingContext mappingContext = redisMappingContext();
+            RedisConverter redisConverter = redisConverter(mappingContext);
+            ObjectHashMapper mapper = hashMapper(redisConverter);
+
+            this.container = streamMapMessageListenerContainer(redisTemplate.getConnectionFactory(), mapper);
+        } else {
+            this.container = streamJsonMessageListenerContainer();
+        }
+
+         */
+
+
         this.container = StreamMessageListenerContainer.create(redisTemplate.getConnectionFactory());
 
         this.subscription = container.receive(
@@ -100,4 +145,33 @@ public class RedisStreamConsumer implements StreamListener<String, MapRecord<Str
         subscription.await(Duration.ofSeconds(2));
         container.start();
     }
+
+    /*
+    RedisMappingContext redisMappingContext() {
+        RedisMappingContext ctx = new RedisMappingContext();
+        ctx.setInitialEntitySet(Collections.singleton(Message.class));
+        return ctx;
+    }
+
+    RedisConverter redisConverter(RedisMappingContext mappingContext) {
+        return new MappingRedisConverter(mappingContext);
+    }
+    
+    ObjectHashMapper hashMapper(RedisConverter converter) {
+        return new ObjectHashMapper(converter);
+    }
+    
+    StreamMessageListenerContainer streamMapMessageListenerContainer(RedisConnectionFactory connectionFactory, ObjectHashMapper hashMapper) {
+        StreamMessageListenerContainer.StreamMessageListenerContainerOptions<String, ObjectRecord<String, Object>> options = StreamMessageListenerContainer.StreamMessageListenerContainerOptions.builder()
+                .objectMapper(hashMapper)
+                .build();
+
+        return StreamMessageListenerContainer.create(connectionFactory, options);
+    }
+    
+    StreamMessageListenerContainer streamJsonMessageListenerContainer() {
+        return StreamMessageListenerContainer.create(redisTemplate.getConnectionFactory());
+    }
+
+     */
 }
